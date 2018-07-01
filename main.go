@@ -2,21 +2,30 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
 type server struct{}
+
+type clientLink struct {
+	clientIP string
+	url      string
+}
 
 var client = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
 }
+
+var storedLinks map[clientLink]string = make(map[clientLink]string, 0)
 
 func getCookieKey(cookie string) string {
 	return strings.SplitN(cookie, "=", 2)[0]
@@ -46,6 +55,21 @@ func getHeaderWithCookies(oldHeaders http.Header, newHeaders http.Header) http.H
 func makeRequest(req *http.Request, collectedCookies []string, redirectCount int) (*http.Response, error) {
 	if redirectCount >= 10 {
 		return nil, errors.New("stopped after 10 redirects")
+	}
+
+	cl := clientLink{
+		clientIP: req.RemoteAddr,
+		url:      req.URL.String(),
+	}
+
+	if _, exists := storedLinks[cl]; exists {
+		originalUrl, err := req.URL.Parse(storedLinks[cl])
+
+		if err != nil {
+			return nil, err
+		}
+
+		req.URL = originalUrl
 	}
 
 	res, err := client.Do(req)
@@ -119,9 +143,7 @@ func makeRequest(req *http.Request, collectedCookies []string, redirectCount int
 			Close:  req.Close,
 		}
 
-		for _, cookie := range res.Header["Set-Cookie"] {
-			collectedCookies = append(collectedCookies, cookie)
-		}
+		collectedCookies := append(collectedCookies, res.Header["Set-Cookie"]...)
 
 		if includeBody {
 			proxyReq.Body = req.Body
@@ -130,9 +152,7 @@ func makeRequest(req *http.Request, collectedCookies []string, redirectCount int
 		return makeRequest(proxyReq, collectedCookies, redirectCount+1)
 	}
 
-	for _, cookie := range collectedCookies {
-		res.Header["Set-Cookie"] = append(res.Header["Set-Cookie"], cookie)
-	}
+	res.Header["Set-Cookie"] = append(res.Header["Set-Cookie"], collectedCookies...)
 
 	return res, err
 }
@@ -191,7 +211,26 @@ func (s server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Printf("Trailer: %v\n", res.Trailer)
 	fmt.Println("")
 
-	body, err := ioutil.ReadAll(res.Body)
+	// decompress body before stripping if compressed
+	reader := res.Body
+	if res.Header.Get("Content-Encoding") == "gzip" {
+		reader, err = gzip.NewReader(res.Body)
+		defer reader.Close()
+	}
+
+	body, err := ioutil.ReadAll(reader)
+
+	regex, _ := regexp.Compile("(https://[a-zA-Z0-9_:#@%/;$()~_?+-=\\.&]*)")
+	strippedBody := regex.ReplaceAllFunc(body, func(u []byte) []byte {
+		url := string(u)
+		strippedUrl := "http://" + string(u[8:])
+		cl := clientLink{
+			clientIP: req.RemoteAddr,
+			url:      strippedUrl,
+		}
+		storedLinks[cl] = url
+		return []byte(strippedUrl)
+	})
 
 	if err != nil {
 		fmt.Printf("Error: %q\n", err)
@@ -204,7 +243,15 @@ func (s server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.WriteHeader(res.StatusCode)
-	w.Write(body)
+	// compress stripped body if necessary
+	if res.Header.Get("Content-Encoding") == "gzip" {
+		var b bytes.Buffer
+		writer := gzip.NewWriter(&b)
+		writer.Write(strippedBody)
+		writer.Close()
+		strippedBody = b.Bytes()
+	}
+	w.Write(strippedBody)
 }
 
 func main() {
