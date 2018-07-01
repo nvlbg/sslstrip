@@ -43,7 +43,7 @@ func getHeaderWithCookies(oldHeaders http.Header, newHeaders http.Header) http.H
 	return oldHeaders
 }
 
-func makeRequest(req *http.Request, redirectCount int) (*http.Response, error) {
+func makeRequest(req *http.Request, collectedCookies []string, redirectCount int) (*http.Response, error) {
 	if redirectCount >= 10 {
 		return nil, errors.New("stopped after 10 redirects")
 	}
@@ -119,11 +119,19 @@ func makeRequest(req *http.Request, redirectCount int) (*http.Response, error) {
 			Close:  req.Close,
 		}
 
+		for _, cookie := range res.Header["Set-Cookie"] {
+			collectedCookies = append(collectedCookies, cookie)
+		}
+
 		if includeBody {
 			proxyReq.Body = req.Body
 		}
 
-		return makeRequest(proxyReq, redirectCount+1)
+		return makeRequest(proxyReq, collectedCookies, redirectCount+1)
+	}
+
+	for _, cookie := range collectedCookies {
+		res.Header["Set-Cookie"] = append(res.Header["Set-Cookie"], cookie)
 	}
 
 	return res, err
@@ -163,7 +171,7 @@ func (s server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		Body:   ioutil.NopCloser(bytes.NewReader(reqBody)),
 	}
 
-	res, err := makeRequest(proxyReq, 1)
+	res, err := makeRequest(proxyReq, make([]string, 0), 1)
 
 	if err != nil {
 		fmt.Printf("Error: %q\n", err)
