@@ -15,17 +15,31 @@ import (
 
 type server struct{}
 
+// clientLink stores client ip and url pair.
+// 
+// We use as a key in the cache which stores
+// the stripped links and their originals
 type clientLink struct {
 	clientIP string
 	url      string
 }
 
+// storedLinks maps stripped urls to their originals
+var storedLinks map[clientLink]string = make(map[clientLink]string, 0)
+var mu sync.RWMutex
+
+// client is the HTTP client we use to make requests
+//
+// We do not want our client to follow redirects so
+// we change the default CheckRedirect function
 var client = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
 }
 
+// ignoredHeaders are the headers that will be ignored
+// when sending the response to the user
 var ignoredHeaders = map[string]struct{}{
 	// content length will change after stripping and needs to be recalculated
 	"Content-Length": struct{}{},
@@ -35,9 +49,7 @@ var ignoredHeaders = map[string]struct{}{
 	"Strict-Transport-Security":   struct{}{},
 }
 
-var storedLinks map[clientLink]string = make(map[clientLink]string, 0)
-var mu sync.RWMutex
-
+// getLink function gives the original url for the stripped one
 func getLink(cl clientLink) (string, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -51,12 +63,14 @@ func getLink(cl clientLink) (string, bool) {
 	return link, exists
 }
 
+// storeLink stores the orginal url for the stripped one
 func setLink(cl clientLink, link string) {
 	mu.Lock()
 	defer mu.Unlock()
 	storedLinks[cl] = link
 }
 
+// normalizeIP extracts the IP part from the RemoteAddr
 func normalizeIP(remoteAddr string) string {
 	return strings.Split(remoteAddr, ":")[0]
 }
