@@ -185,6 +185,50 @@ func stripResponse(req *http.Request, res *http.Response) ([]byte, error) {
 		return []byte(strippedUrl)
 	})
 
+	if strings.Contains(res.Header.Get("Content-Type"), "text/css") {
+		cssUrlsRegex := regexp.MustCompile("url\\(['\"]?([a-zA-Z0-9_:#@%/;$~_?+-=\\.&]*)['\"]?\\)")
+		strippedBody = cssUrlsRegex.ReplaceAllFunc(strippedBody, func(u []byte) []byte {
+			url := string(u)
+
+			if strings.HasPrefix(url, "url('http") || strings.HasPrefix(url, "url(\"http") ||
+				strings.HasPrefix(url, "url(http") || strings.Contains(url, "base64") {
+				return u
+			}
+
+			var absoluteUrl string
+			if strings.HasPrefix(url, "url('/") || strings.HasPrefix(url, "url(\"/") {
+				absoluteUrl = req.URL.Scheme + "://" + req.Host + url[5:len(url)-1]
+			} else if strings.HasPrefix(url, "url(/") {
+				absoluteUrl = req.URL.Scheme + "://" + req.Host + url[4:len(url)-1]
+			} else if strings.HasPrefix(url, "url('") || strings.HasPrefix(url, "url(\"") {
+				absoluteUrl = req.URL.Scheme + "://" + req.Host + req.URL.Path + "/" + url[5:len(url)-1]
+			} else if strings.HasPrefix(url, "url(") {
+				absoluteUrl = req.URL.Scheme + "://" + req.Host + req.URL.Path + "/" + url[4:len(url)-1]
+			}
+
+			strippedUrl := absoluteUrl
+			if req.URL.Scheme == "https" {
+				strippedUrl = "http" + absoluteUrl[5:]
+			}
+
+			// strippedUrl, err := normalizeUrl(strippedUrl)
+
+			// if err != nil {
+			// 	fmt.Fprintf(os.Stderr, "Warning: could not normalize url %s: %q\n", absoluteUrl, err)
+			// 	return u
+			// }
+
+			// store original link for future requests
+			key := clientLink{
+				clientIP: normalizeIP(req.RemoteAddr),
+				url:      strippedUrl,
+			}
+			setLink(key, absoluteUrl)
+
+			return []byte("url('" + strippedUrl + "')")
+		})
+	}
+
 	return strippedBody, nil
 }
 
@@ -236,7 +280,7 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	}
 
 	// strip response
-	strippedBody, err := stripResponse(req, res)
+	strippedBody, err := stripResponse(proxyReq, res)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error when stripping response: %q\n", err)
 		return
