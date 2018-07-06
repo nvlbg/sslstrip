@@ -45,9 +45,17 @@ var client = &http.Client{
 	},
 }
 
-// ignoredHeaders are the headers that will be ignored
+// ignoredRequestHeaders are the headers that will be ignored
+// when sending the request to the server
+var ignoredRequestHeaders = map[string]struct{}{
+	"Cache-Control":     struct{}{},
+	"If-Modified-Since": struct{}{},
+	"If-None-Match":     struct{}{},
+}
+
+// ignoredResponseHeaders are the headers that will be ignored
 // when sending the response to the user
-var ignoredHeaders = map[string]struct{}{
+var ignoredResponseHeaders = map[string]struct{}{
 	// content length will change after stripping and needs to be recalculated
 	"Content-Length": struct{}{},
 	// hsts and hpkp headers
@@ -191,11 +199,18 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 		fmt.Fprintf(s.logger, "%q %q %q %q\nHeaders: %q\nBody: %q\n\n", time.Now().Format(time.RFC850), req.RemoteAddr, req.Method, req.URL, req.Header, reqBody)
 	}
 
+	proxyHeaders := make(http.Header)
+	for key, value := range req.Header {
+		if _, ignored := ignoredRequestHeaders[key]; !ignored {
+			proxyHeaders[key] = value
+		}
+	}
+
 	// build request to be made
 	proxyReq := &http.Request{
 		Method:     req.Method,
 		URL:        req.URL,
-		Header:     req.Header,
+		Header:     proxyHeaders,
 		Host:       req.Host,
 		Close:      req.Close,
 		Body:       ioutil.NopCloser(bytes.NewReader(reqBody)),
@@ -244,7 +259,7 @@ func (s server) ServeHTTP(responseWriter http.ResponseWriter, req *http.Request)
 	// build headers that will be returned to the client
 	header := responseWriter.Header()
 	for key, value := range res.Header {
-		if _, ignored := ignoredHeaders[key]; !ignored {
+		if _, ignored := ignoredResponseHeaders[key]; !ignored {
 			header[key] = value
 		}
 	}
